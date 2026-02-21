@@ -8,10 +8,18 @@
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
         .drop-zone { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; cursor: pointer; }
         .drop-zone.dragover { background: #f0f0f0; border-color: #999; }
-        button { padding: 10px 20px; background: #4CAF50; color: white; border: none; cursor: pointer; }
-        button:disabled { background: #ccc; }
+        button { padding: 10px 20px; background: #4CAF50; color: white; border: none; cursor: pointer; margin: 5px; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.danger { background: #f44336; }
         .file-list { margin: 20px 0; }
-        .log { background: #f5f5f5; padding: 10px; height: 200px; overflow-y: scroll; font-family: monospace; }
+        .file-item { display: flex; align-items: center; padding: 8px; background: #f9f9f9; margin: 5px 0; border-radius: 4px; }
+        .file-name { flex: 1; }
+        .file-status { margin-left: 10px; font-size: 0.9em; }
+        .status-success { color: #4CAF50; }
+        .status-error { color: #f44336; }
+        .status-pending { color: #ff9800; }
+        .log { background: #f5f5f5; padding: 10px; height: 200px; overflow-y: scroll; font-family: monospace; font-size: 12px; border-radius: 4px; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; }
     </style>
 </head>
 <body>
@@ -20,13 +28,20 @@
     
     <div class="drop-zone" id="dropZone">
         📁 Перетащи ZIP-архивы сюда или кликни для выбора
-        <input type="file" id="fileInput" multiple accept=".zip" style="display: none;">
+        <input type="file" id="fileInput" multiple accept=".zip,.mcpack,.mcaddon" style="display: none;">
     </div>
     
-    <div class="file-list" id="fileList"></div>
+    <div class="file-list" id="fileList">
+        <h3>Выбрано файлов: <span id="fileCount">0</span></h3>
+        <div id="fileItems"></div>
+    </div>
     
-    <button id="convertBtn" disabled>🔄 Конвертировать все</button>
-    <button id="downloadAllBtn" disabled style="margin-left: 10px;">📦 Скачать всё (ZIP)</button>
+    <div class="button-group">
+        <button id="convertBtn" disabled>🔄 Конвертировать все</button>
+        <button id="downloadAllBtn" disabled>📦 Скачать все (по отдельности)</button>
+        <button id="downloadSingleZipBtn" disabled>📦 Скачать одним архивом</button>
+        <button id="clearBtn" class="danger">🗑️ Очистить всё</button>
+    </div>
     
     <h3>Лог:</h3>
     <div class="log" id="log"></div>
@@ -35,21 +50,27 @@
     <script>
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
-        const fileList = document.getElementById('fileList');
+        const fileItems = document.getElementById('fileItems');
+        const fileCount = document.getElementById('fileCount');
         const convertBtn = document.getElementById('convertBtn');
         const downloadAllBtn = document.getElementById('downloadAllBtn');
+        const downloadSingleZipBtn = document.getElementById('downloadSingleZipBtn');
+        const clearBtn = document.getElementById('clearBtn');
         const log = document.getElementById('log');
         
-        let files = [];
-        let convertedFiles = new Map(); // имя -> JSZip объект
+        let files = []; // оригинальные файлы
+        let convertedFiles = new Map(); // имя -> { blob, count, originalName }
         
-        // Логирование
-        function addLog(message) {
-            log.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}\n`;
+        function addLog(message, isError = false) {
+            const prefix = isError ? '❌' : '✓';
+            log.innerHTML += `[${new Date().toLocaleTimeString()}] ${prefix} ${message}\n`;
             log.scrollTop = log.scrollHeight;
         }
         
-        // Конвертация rotation
+        function clearLog() {
+            log.innerHTML = '';
+        }
+        
         function convertRotation(oldRotation) {
             if (!oldRotation || typeof oldRotation !== 'object') return oldRotation;
             if (oldRotation.x !== undefined || oldRotation.y !== undefined || oldRotation.z !== undefined) {
@@ -65,7 +86,6 @@
             return oldRotation;
         }
         
-        // Конвертация модели
         function convertModel(modelData) {
             if (!modelData || typeof modelData !== 'object') return modelData;
             
@@ -84,9 +104,8 @@
             return modelData;
         }
         
-        // Обработка ZIP файла
         async function processZip(file) {
-            addLog(`📦 Обработка: ${file.name}`);
+            addLog(`Обработка: ${file.name}`);
             
             try {
                 const zip = new JSZip();
@@ -98,7 +117,6 @@
                 contents.forEach((relativePath, zipEntry) => {
                     if (!zipEntry.dir) {
                         const promise = zipEntry.async('string').then(content => {
-                            // Проверяем, является ли файл JSON моделью предмета
                             if (relativePath.includes('models/item/') && relativePath.endsWith('.json')) {
                                 try {
                                     const modelData = JSON.parse(content);
@@ -107,8 +125,8 @@
                                     modelCount++;
                                     addLog(`  ✅ ${relativePath}`);
                                 } catch (e) {
-                                    addLog(`  ❌ Ошибка в ${relativePath}: ${e.message}`);
-                                    newZip.file(relativePath, content); // сохраняем оригинал
+                                    addLog(`  ⚠️ Ошибка в ${relativePath}: ${e.message} (сохранён оригинал)`, true);
+                                    newZip.file(relativePath, content);
                                 }
                             } else {
                                 newZip.file(relativePath, content);
@@ -121,30 +139,70 @@
                 await Promise.all(promises);
                 
                 const zipBlob = await newZip.generateAsync({ type: 'blob' });
-                convertedFiles.set(file.name, { blob: zipBlob, count: modelCount });
                 
-                addLog(`✅ Готово: ${file.name} (конвертировано моделей: ${modelCount})`);
-                return true;
+                // Сохраняем результат
+                const newName = file.name.replace(/\.(zip|mcpack|mcaddon)$/, '_converted.zip');
+                convertedFiles.set(file.name, { 
+                    blob: zipBlob, 
+                    count: modelCount,
+                    newName: newName,
+                    originalName: file.name 
+                });
+                
+                // Обновляем статус в списке
+                updateFileStatus(file.name, 'success', `✅ ${modelCount} моделей`);
+                addLog(`✅ Готово: ${file.name} → ${newName} (${modelCount} моделей)`);
+                
             } catch (e) {
-                addLog(`❌ Ошибка обработки ${file.name}: ${e.message}`);
-                return false;
+                addLog(`❌ Ошибка обработки ${file.name}: ${e.message}`, true);
+                updateFileStatus(file.name, 'error', '❌ Ошибка');
+            }
+            
+            updateButtons();
+        }
+        
+        function updateFileStatus(fileName, status, statusText) {
+            const item = document.querySelector(`[data-file="${fileName}"]`);
+            if (item) {
+                const statusSpan = item.querySelector('.file-status');
+                statusSpan.className = `file-status status-${status}`;
+                statusSpan.textContent = statusText;
             }
         }
         
-        // Обновление списка файлов
-        function updateFileList() {
-            fileList.innerHTML = '<h3>Выбрано файлов:</h3>';
+        function renderFileList() {
+            if (files.length === 0) {
+                fileItems.innerHTML = '<p>Файлы не выбраны</p>';
+                fileCount.textContent = '0';
+                return;
+            }
+            
+            let html = '';
             files.forEach(file => {
-                const div = document.createElement('div');
-                div.textContent = `📄 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
-                fileList.appendChild(div);
+                const converted = convertedFiles.get(file.name);
+                const status = converted ? 
+                    `<span class="file-status status-success">✅ ${converted.count} моделей</span>` : 
+                    `<span class="file-status status-pending">⏳ Ожидает конвертации</span>`;
+                
+                html += `
+                    <div class="file-item" data-file="${file.name}">
+                        <span class="file-name">📄 ${file.name} (${(file.size / 1024).toFixed(1)} KB)</span>
+                        ${status}
+                    </div>
+                `;
             });
             
-            convertBtn.disabled = files.length === 0;
-            downloadAllBtn.disabled = convertedFiles.size === 0;
+            fileItems.innerHTML = html;
+            fileCount.textContent = files.length;
         }
         
-        // Drag & drop обработчики
+        function updateButtons() {
+            convertBtn.disabled = files.length === 0;
+            downloadAllBtn.disabled = convertedFiles.size === 0;
+            downloadSingleZipBtn.disabled = convertedFiles.size === 0;
+        }
+        
+        // Drag & drop
         dropZone.addEventListener('click', () => fileInput.click());
         
         dropZone.addEventListener('dragover', (e) => {
@@ -159,53 +217,84 @@
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
-            const droppedFiles = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.zip'));
-            files = [...files, ...droppedFiles];
-            updateFileList();
+            const droppedFiles = Array.from(e.dataTransfer.files)
+                .filter(f => f.name.match(/\.(zip|mcpack|mcaddon)$/i));
+            
+            droppedFiles.forEach(file => {
+                if (!files.some(f => f.name === file.name)) {
+                    files.push(file);
+                }
+            });
+            
+            renderFileList();
+            updateButtons();
         });
         
         fileInput.addEventListener('change', (e) => {
             const selectedFiles = Array.from(e.target.files);
-            files = [...files, ...selectedFiles];
-            updateFileList();
+            selectedFiles.forEach(file => {
+                if (!files.some(f => f.name === file.name)) {
+                    files.push(file);
+                }
+            });
+            renderFileList();
+            updateButtons();
         });
         
         // Конвертация
         convertBtn.addEventListener('click', async () => {
             addLog('🔄 Начало конвертации...');
             convertedFiles.clear();
-            downloadAllBtn.disabled = true;
             
             for (const file of files) {
                 await processZip(file);
             }
             
-            downloadAllBtn.disabled = convertedFiles.size === 0;
+            renderFileList();
             addLog('✅ Конвертация завершена!');
         });
         
-        // Скачать всё одним архивом
-        downloadAllBtn.addEventListener('click', async () => {
+        // Скачать все файлы по отдельности
+        downloadAllBtn.addEventListener('click', () => {
+            for (const [_, data] of convertedFiles) {
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(data.blob);
+                link.download = data.newName;
+                link.click();
+                URL.revokeObjectURL(link.href);
+            }
+            addLog(`📦 Скачано файлов: ${convertedFiles.size}`);
+        });
+        
+        // Скачать одним архивом (ZIP внутри ZIP - исправлено!)
+        downloadSingleZipBtn.addEventListener('click', async () => {
+            addLog('📦 Создание общего архива...');
+            
             const finalZip = new JSZip();
             
-            for (const [originalName, data] of convertedFiles) {
-                const newName = originalName.replace('.zip', '_converted.zip');
-                finalZip.file(newName, data.blob);
+            for (const [_, data] of convertedFiles) {
+                // Добавляем каждый конвертированный ZIP как отдельный файл в корень
+                finalZip.file(data.newName, data.blob);
             }
             
             const blob = await finalZip.generateAsync({ type: 'blob' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
-            link.download = 'converted_packs.zip';
+            link.download = 'all_converted_packs.zip';
             link.click();
             
-            addLog('📦 Архив со всеми конвертированными файлами скачан');
+            addLog(`✅ Общий архив all_converted_packs.zip создан (${convertedFiles.size} файлов)`);
         });
         
-        // Очистка лога
-        function clearLog() {
-            log.innerHTML = '';
-        }
+        // Очистка
+        clearBtn.addEventListener('click', () => {
+            files = [];
+            convertedFiles.clear();
+            renderFileList();
+            updateButtons();
+            clearLog();
+            addLog('🗑️ Список очищен');
+        });
     </script>
 </body>
 </html>
