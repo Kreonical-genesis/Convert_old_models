@@ -89,10 +89,16 @@
         function convertModel(modelData) {
             if (!modelData || typeof modelData !== 'object') return modelData;
             
+            const CREDITS = "Converted with https://github.com/Kreorical-genesis/Convert_old_models";
+            
             if (modelData.format_version) {
                 modelData.format_version = "1.21.11";
             }
-            
+            if (modelData.credit) {
+                modelData.credit = modelData.credit + " | " + CREDITS;
+            } else {
+                modelData.credit = CREDITS;
+            }
             if (modelData.elements && Array.isArray(modelData.elements)) {
                 modelData.elements.forEach(element => {
                     if (element.rotation) {
