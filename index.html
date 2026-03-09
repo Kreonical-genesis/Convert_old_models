@@ -116,8 +116,9 @@
                 const promises = [];
                 contents.forEach((relativePath, zipEntry) => {
                     if (!zipEntry.dir) {
-                        const promise = zipEntry.async('string').then(content => {
-                            if (relativePath.includes('models/item/') && relativePath.endsWith('.json')) {
+                        const isJsonModel = relativePath.includes('models/item/') && relativePath.endsWith('.json');
+                        const promise = (isJsonModel ? zipEntry.async('string') : zipEntry.async('blob')).then(content => {
+                            if (isJsonModel) {
                                 try {
                                     const modelData = JSON.parse(content);
                                     const converted = convertModel(modelData);
@@ -135,7 +136,7 @@
                         promises.push(promise);
                     }
                 });
-                
+
                 await Promise.all(promises);
                 
                 const zipBlob = await newZip.generateAsync({ type: 'blob' });
